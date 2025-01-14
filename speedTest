@@ -1,0 +1,135 @@
+import numpy as np
+import cv2
+import time
+from datetime import datetime
+import serial
+import os
+import pandas as pd
+
+# Initialize Serial Port
+try:
+    ser = serial.Serial('COM5', 9600)
+    print(f"Serial port {ser.name} opened successfully.")
+except Exception as e:
+    print(f"Error opening serial port: {e}")
+    exit()
+
+# IR Commands
+P_ON = b'ka 00 01\n'
+Home = b'mc 00 7C\n'
+OK = b'mc 00 44\n'
+DpadLt = b'mc 00 07\n'
+DpadDn = b'mc 00 41\n'
+
+# Parameters
+input_loc = 1
+gray_threshold = 100
+Loop = 1
+max_loops = 11
+SOC = 'LG_Channel_'
+CP = 'V03410530_240114_LM21A'
+output_csv = 'output_LM21A.csv'
+
+ser.write(P_ON)
+print("Power On TV")
+time.sleep(30)
+print("Waiting TV settledown")
+
+
+# Ensure output CSV exists
+if not os.path.exists(output_csv):
+    with open(output_csv, 'w') as f:
+        f.write("Channel,Delay\n")
+
+# Helper Function: Send Serial Command
+def send_command(command, delay=2):
+    ser.write(command)
+    time.sleep(delay)
+
+
+
+# Main Loop
+while Loop <= max_loops:
+    print(f"Starting Loop {Loop}...")
+
+    send_command(Home, delay=5)
+    print("Launching LGC...")
+    send_command(OK, delay=0)
+
+
+
+    # Initialize Camera
+    cap = cv2.VideoCapture(input_loc)
+
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+
+
+    nowOK = datetime.now()
+    start_time = time.time()
+
+    # Create Directory for Images
+    directory_path = f"C:/Temp/{SOC}{CP}_{Loop}"
+    os.makedirs(directory_path, exist_ok=True)
+
+    comp = []
+    count = 0
+
+    while True:
+        ret, frame = cap.read()
+
+        
+        if not ret:
+            print("Failed to capture frame.")
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        kernel = np.ones((1, 1), np.uint8)
+        processed = cv2.erode(cv2.dilate(gray, kernel, iterations=1), kernel, iterations=1)
+        mean_value = processed.mean()
+
+        elapsed_time = (time.time() - start_time) * 1000
+        cv2.putText(
+            processed,
+            f"Elapsed: {elapsed_time:.0f}ms, Mean: {mean_value:.2f}",
+            (10, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+        cv2.imshow('frame', processed)
+        cv2.imwrite(f"{directory_path}/{count + 1:05d}.jpg", processed)
+        count += 1
+        comp.append(mean_value)
+
+        # Check Stabilization
+        if count > 5 and abs(comp[-1] - comp[-4]) < 1 and mean_value >= gray_threshold:
+            with open(output_csv, 'a') as f:
+                f.write(f"{Loop},{elapsed_time:.0f}\n")
+            print(f"Channel {Loop} stabilized in {elapsed_time:.0f} ms.")
+            break
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            Loop = max_loops + 1
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    # Exit Channel
+    print("Exiting LGC...")
+    for _ in range(3):
+        send_command(DpadLt)
+    for _ in range(6):
+        send_command(DpadDn)
+    send_command(OK, delay=2)
+    send_command(OK, delay=2)
+
+    Loop += 1
+    time.sleep(5)
+
+print("Process completed.")
+ser.close()
